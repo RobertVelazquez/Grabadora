@@ -1,0 +1,29 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <ApplicationIcon>obj\Resource\logo.ico</ApplicationIcon>
+    
+  </PropertyGroup>
+
+  <!-- Establecer x64 como plataforma por defecto si no se especifica -->
+  <PropertyGroup Condition="'$(Platform)' == ''">
+    <Platform>x64</Platform>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="NAudio.Lame" Version="2.1.0" />
+    <PackageReference Include="NAudio.WinForms" Version="2.2.1" />
+    <PackageReference Include="SoundTouch.Net" Version="2.3.2" />
+    <!-- Host VST2 plugins usando VST.NET (requiere .NET Framework, no net8.0) -->
+    <!-- <PackageReference Include="VST.NET2-Host" Version="2.1.0" /> -->
+  </ItemGroup>
+
+</Project>
