@@ -14,6 +14,18 @@ namespace Grabadora
         private int _clipRightTimer;
         private const int ClipHoldFrames = 20; // Mantener encendido por ~20 actualizaciones
         
+        // Caché de pinceles para optimizar GDI+ y no usar 'new' en OnPaint
+        private readonly SolidBrush _clipActiveBrush = new SolidBrush(Color.Red);
+        private readonly SolidBrush _clipInactiveBrush = new SolidBrush(Color.FromArgb(50, 20, 20));
+        
+        private readonly SolidBrush _greenBrush = new SolidBrush(Color.LimeGreen);
+        private readonly SolidBrush _yellowBrush = new SolidBrush(Color.Yellow);
+        private readonly SolidBrush _redBrush = new SolidBrush(Color.Red);
+        
+        private readonly SolidBrush _dimGreenBrush = new SolidBrush(Color.FromArgb(40, Color.LimeGreen));
+        private readonly SolidBrush _dimYellowBrush = new SolidBrush(Color.FromArgb(40, Color.Yellow));
+        private readonly SolidBrush _dimRedBrush = new SolidBrush(Color.FromArgb(40, Color.Red));
+
         public VuMeterControl()
         {
             this.DoubleBuffered = true;
@@ -70,11 +82,8 @@ namespace Grabadora
         private void DrawClip(Graphics g, int x, int y, int width, int height, bool active)
         {
             // Rojo brillante si hay clipping, rojo muy oscuro si no
-            Color c = active ? Color.Red : Color.FromArgb(50, 20, 20);
-            using (var b = new SolidBrush(c))
-            {
-                g.FillRectangle(b, x, y, width, height);
-            }
+            SolidBrush b = active ? _clipActiveBrush : _clipInactiveBrush;
+            g.FillRectangle(b, x, y, width, height);
         }
 
         private void DrawBar(Graphics g, int x, int yStart, int width, int ledHeight, int totalLeds, float level)
@@ -88,22 +97,24 @@ namespace Grabadora
                 int y = yStart + (i * ledHeight);
                 int h = Math.Max(1, ledHeight - 1); // -1 para dejar un pequeño espacio negro entre LEDs
 
-                // Determinar color según la altura (Verde -> Amarillo -> Rojo)
-                Color color;
-                if (ledIndex >= totalLeds - 2) color = Color.Red;        // Últimos 2 (Pico)
-                else if (ledIndex >= totalLeds - 5) color = Color.Yellow; // Medios
-                else color = Color.LimeGreen;                             // Bajos
+                SolidBrush brushToUse;
+                bool isActive = ledIndex < activeLeds;
 
-                // Si el LED no está activo, lo oscurecemos mucho (efecto apagado)
-                if (ledIndex >= activeLeds)
+                // Determinar pincel según la altura (Verde -> Amarillo -> Rojo) y si está activo o apagado
+                if (ledIndex >= totalLeds - 2)
                 {
-                    color = Color.FromArgb(40, color.R, color.G, color.B);
+                    brushToUse = isActive ? _redBrush : _dimRedBrush;
+                }
+                else if (ledIndex >= totalLeds - 5)
+                {
+                    brushToUse = isActive ? _yellowBrush : _dimYellowBrush;
+                }
+                else
+                {
+                    brushToUse = isActive ? _greenBrush : _dimGreenBrush;
                 }
 
-                using (SolidBrush brush = new SolidBrush(color))
-                {
-                    g.FillRectangle(brush, x, y, width, h);
-                }
+                g.FillRectangle(brushToUse, x, y, width, h);
             }
         }
     }

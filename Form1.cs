@@ -47,17 +47,6 @@ namespace Grabadora
         {
             InitializeComponent();
             _engine = new AudioEngine();
-            // Usar el mismo icono que el ejecutable
-            try
-            {
-                var exeIcon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-                if (exeIcon != null)
-                    this.Icon = exeIcon;
-            }
-            catch
-            {
-                // Si falla, simplemente dejamos el icono por defecto
-            }
             SetupCustomUI();
             _engine.PlaybackStopped += () =>
             {
@@ -911,10 +900,25 @@ namespace Grabadora
             trackControl.DuplicateRequested += TrackControl_DuplicateRequested;
             trackControl.MoveUpRequested += TrackControl_MoveUpRequested;
             trackControl.MoveDownRequested += TrackControl_MoveDownRequested;
+            trackControl.MonitorRequested += TrackControl_MonitorRequested;
             
             _tracksContainer.Controls.Add(trackControl);
             // Asegurar que la nueva pista se agregue al final visualmente (índice mayor = más abajo)
             _tracksContainer.Controls.SetChildIndex(trackControl, _tracksContainer.Controls.Count - 1);
+        }
+
+        private void TrackControl_MonitorRequested(object? sender, EventArgs e)
+        {
+            if (sender is TrackControl activeTrack)
+            {
+                foreach (Control c in _tracksContainer.Controls)
+                {
+                    if (c is TrackControl tc && tc != activeTrack)
+                    {
+                        tc.TurnOffMonitor();
+                    }
+                }
+            }
         }
 
         private void TrackControl_MoveUpRequested(object? sender, EventArgs e)
@@ -1208,12 +1212,10 @@ namespace Grabadora
                     // Finalizar la grabación en el motor (reemplaza la pista monitor por la de archivo)
                     _engine.FinalizeRecording(filePath);
 
-                    // Refrescar la UI (el TrackControl ya existe, solo necesita redibujarse con la onda real)
-                    UpdateTimeLabel();
-                    UpdateTracksVisuals();
+                    // Reconstruir la UI para que la pista grabada pierda los botones en vivo (Mic/Rec)
+                    RebuildTrackControls();
 
-                    // Forzar repintado para mostrar la onda
-                    foreach(Control c in _tracksContainer.Controls) if(c is TrackControl tc) tc.RefreshWaveform(); // Aquí sí queremos regenerar datos
+                    UpdateTimeLabel();
                 }
                 catch (Exception ex) { MessageBox.Show($"Error al procesar grabación: {ex.Message}"); }
             }));

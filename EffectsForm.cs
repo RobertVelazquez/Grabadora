@@ -201,7 +201,7 @@ namespace Grabadora
 
         private void LoadCurrentValues()
         {
-            dynamic p = _engine.GetEffectParameters(_trackIndex);
+            TrackData p = _engine.GetEffectParameters(_trackIndex);
             if (p == null) return;
 
             if (_mode == ViewMode.Equalizer)
@@ -212,36 +212,33 @@ namespace Grabadora
             }
             else
             {
-                if (_knobDelayTime != null)
-                {
-                    _knobDelayTime.Value = (float)p.Delay.Delay;
-                    _knobDelayFeedback.Value = (float)p.Delay.Feedback;
-                    _knobDelayMix.Value = (float)p.Delay.Mix;
+                // Delay
+                _knobDelayTime.Value = p.Delay.TimeMs;
+                _knobDelayFeedback.Value = p.Delay.Feedback;
+                _knobDelayMix.Value = p.Delay.Mix;
 
-                    _knobCompThresh.Value = (float)p.Compressor.Threshold;
-                    _knobCompRatio.Value = (float)p.Compressor.Ratio;
-                    _knobCompAttack.Value = (float)p.Compressor.Attack;
-                    _knobCompRelease.Value = (float)p.Compressor.Release;
+                // Compressor
+                _knobCompThresh.Value = p.Compressor.Threshold;
+                _knobCompRatio.Value = p.Compressor.Ratio;
+                _knobCompAttack.Value = p.Compressor.Attack;
+                _knobCompRelease.Value = p.Compressor.Release;
 
-                    _cbFilterType.SelectedIndex = (int)p.Filter.Type;
-                    _knobFilterCutoff.Value = (float)p.Filter.Cutoff;
+                // Filter
+                _cbFilterType.SelectedIndex = p.Filter.Type;
+                _knobFilterCutoff.Value = p.Filter.Cutoff;
 
-                    _knobReverbMix.Value = (float)p.Reverb.Mix;
-                    _knobReverbSize.Value = (float)p.Reverb.RoomSize;
+                // Reverb
+                _knobReverbMix.Value = p.Reverb.Mix;
+                _knobReverbSize.Value = p.Reverb.Size;
 
-                    if (p.GetType().GetProperty("Distortion") != null)
-                    {
-                        _knobDistDrive.Value = (float)p.Distortion.Drive;
-                        _knobDistMix.Value = (float)p.Distortion.Mix;
-                    }
+                // Distortion
+                _knobDistDrive.Value = p.Distortion.Drive;
+                _knobDistMix.Value = p.Distortion.Mix;
 
-                    if (p.GetType().GetProperty("Chorus") != null)
-                    {
-                        _knobChorusMix.Value = (float)p.Chorus.Mix;
-                        _knobChorusDepth.Value = (float)p.Chorus.Depth;
-                        _knobChorusRate.Value = (float)p.Chorus.Rate;
-                    }
-                }
+                // Chorus
+                _knobChorusMix.Value = p.Chorus.Mix;
+                _knobChorusDepth.Value = p.Chorus.Depth;
+                _knobChorusRate.Value = p.Chorus.Rate;
             }
         }
     }

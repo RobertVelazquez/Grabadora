@@ -288,6 +288,133 @@ namespace Grabadora
             FinalProvider = MeteringProvider;
         }
 
+        // --- SOPORTE PARA FORMA DE ONDA EN VIVO ---
+        public readonly object LiveSamplesLock = new object();
+        private float[] _liveSamplesBuffer;
+        public float[] LiveSamplesBuffer => _liveSamplesBuffer;
+        public int LiveSamplesCount { get; private set; }
+
+        private void EnsureLiveBufferCapacity(int newSamples)
+        {
+            if (_liveSamplesBuffer == null) 
+            {
+                int rate = MonitorProvider?.WaveFormat?.SampleRate ?? RecordingBuffer?.WaveFormat?.SampleRate ?? 44100;
+                int ch = MonitorProvider?.WaveFormat?.Channels ?? RecordingBuffer?.WaveFormat?.Channels ?? 1;
+                _liveSamplesBuffer = new float[Math.Max(newSamples, rate * ch * 60)]; // Iniciar con 1 minuto de capacidad
+            }
+            else if (LiveSamplesCount + newSamples > _liveSamplesBuffer.Length)
+            {
+                Array.Resize(ref _liveSamplesBuffer, Math.Max(_liveSamplesBuffer.Length * 2, LiveSamplesCount + newSamples));
+            }
+        }
+
+        public void AddLiveSamples(float[] samples, int count)
+        {
+            lock (LiveSamplesLock)
+            {
+                EnsureLiveBufferCapacity(count);
+                Array.Copy(samples, 0, _liveSamplesBuffer, LiveSamplesCount, count);
+                LiveSamplesCount += count;
+            }
+        }
+
+        public void AddLiveSamplesFromBytes(byte[] buffer, int bytesRecorded, int bitsPerSample)
+        {
+            if (bitsPerSample == 16)
+            {
+                int samples = bytesRecorded / 2;
+                lock (LiveSamplesLock)
+                {
+                    EnsureLiveBufferCapacity(samples);
+                    for (int i = 0; i < samples; i++)
+                    {
+                        short val = (short)(buffer[i * 2] | (buffer[i * 2 + 1] << 8));
+                        _liveSamplesBuffer[LiveSamplesCount++] = val / 32768f;
+                    }
+                }
+            }
+            else if (bitsPerSample == 32) // IEEE Float
+            {
+                int samples = bytesRecorded / 4;
+                lock (LiveSamplesLock)
+                {
+                    EnsureLiveBufferCapacity(samples);
+                    Buffer.BlockCopy(buffer, 0, _liveSamplesBuffer, LiveSamplesCount * 4, bytesRecorded);
+                    LiveSamplesCount += samples;
+                }
+            }
+        }
+
+        // --- MEDIDORES DE ENTRADA Y CAÍDA (DECAY) ---
+        private float _liveInputPeak;
+        public float LiveInputPeak => _liveInputPeak;
+
+        public void UpdateLiveInputPeak(float[] samples, int count)
+        {
+            float max = 0;
+            for (int i = 0; i < count; i++)
+            {
+                float abs = Math.Abs(samples[i]);
+                if (abs > max) max = abs;
+            }
+            if (max > _liveInputPeak) _liveInputPeak = max;
+        }
+
+        public void UpdateLiveInputPeak(byte[] buffer, int bytesRecorded, int bitsPerSample)
+        {
+            float max = 0;
+            if (bitsPerSample == 16)
+            {
+                int samples = bytesRecorded / 2;
+                for (int i = 0; i < samples; i++)
+                {
+                    short val = (short)(buffer[i * 2] | (buffer[i * 2 + 1] << 8));
+                    float abs = Math.Abs(val / 32768f);
+                    if (abs > max) max = abs;
+                }
+            }
+            else if (bitsPerSample == 32)
+            {
+                int samples = bytesRecorded / 4;
+                for (int i = 0; i < samples; i++)
+                {
+                    float val = BitConverter.ToSingle(buffer, i * 4);
+                    float abs = Math.Abs(val);
+                    if (abs > max) max = abs;
+                }
+            }
+            if (max > _liveInputPeak) _liveInputPeak = max;
+        }
+
+        public void DecayLiveInputPeak()
+        {
+            _liveInputPeak *= 0.85f;
+            if (_liveInputPeak < 0.001f) _liveInputPeak = 0;
+        }
+
+        public void DecayPlaybackPeaks()
+        {
+            LastPeakLeft *= 0.85f;
+            if (LastPeakLeft < 0.001f) LastPeakLeft = 0;
+            
+            LastPeakRight *= 0.85f;
+            if (LastPeakRight < 0.001f) LastPeakRight = 0;
+        }
+
+        public void PadLiveSamples(TimeSpan duration, WaveFormat format)
+        {
+            int totalSamples = (int)(duration.TotalSeconds * format.SampleRate) * format.Channels;
+            if (totalSamples <= 0) return;
+
+            lock (LiveSamplesLock)
+            {
+                EnsureLiveBufferCapacity(totalSamples);
+                Array.Clear(_liveSamplesBuffer, LiveSamplesCount, totalSamples); // Rellenar silencio
+                LiveSamplesCount += totalSamples;
+            }
+        }
+        // ------------------------------------------
+
         public void Dispose()
         {
             Reader?.Dispose();
@@ -416,6 +543,13 @@ namespace Grabadora
             get
             {
                 var tracksTotal = _tracks.Count > 0 ? _tracks.Max(t => t.Reader?.TotalTime ?? TimeSpan.Zero) : TimeSpan.Zero;
+                if (IsRecording && _recordingWriter != null)
+                {
+                    double bytes = _recordingWriter.Length;
+                    double rate = _recordingWriter.WaveFormat.AverageBytesPerSecond;
+                    TimeSpan recTime = _recordStartTime + TimeSpan.FromSeconds(bytes / rate);
+                    if (recTime > tracksTotal) tracksTotal = recTime;
+                }
                 return tracksTotal > ProjectDuration ? tracksTotal : ProjectDuration;
             }
         }
@@ -931,11 +1065,15 @@ namespace Grabadora
 
             _recorder.DataAvailable += (s, e) =>
             {
+                if (!_isMonitoringInput && !IsRecording) return; // Cortar entrada si el monitor está apagado
+
                 _currentRecordingTrack?.MonitorProvider.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                _currentRecordingTrack?.UpdateLiveInputPeak(e.Buffer, e.BytesRecorded, _recorder.WaveFormat.BitsPerSample);
 
                 if (IsRecording && _recordingWriter != null)
                 {
                     _recordingWriter.Write(e.Buffer, 0, e.BytesRecorded);
+                    _currentRecordingTrack?.AddLiveSamplesFromBytes(e.Buffer, e.BytesRecorded, _recorder.WaveFormat.BitsPerSample);
                 }
             };
 
@@ -1046,6 +1184,9 @@ namespace Grabadora
                         remaining -= toWrite;
                     }
                 }
+                
+                // Alinear visualmente con silencio al principio si la grabación no empieza en 0
+                _currentRecordingTrack?.PadLiveSamples(_recordStartTime, format);
             }
             
             IsRecording = true;
@@ -1202,6 +1343,15 @@ namespace Grabadora
             return track != null && (track.MonitorProvider != null || track.RecordingBuffer != null);
         }
 
+        public void SetActiveRecordingTrack(int trackIndex)
+        {
+            var track = GetTrack(trackIndex);
+            if (track != null && IsTrackRecording(trackIndex))
+            {
+                _currentRecordingTrack = track;
+            }
+        }
+
         // Métodos para previsualizar notas (usados por el Piano Roll)
         public void PreviewNoteOn(int trackIndex, int noteNumber, int velocity)
         {
@@ -1264,13 +1414,13 @@ namespace Grabadora
             if (IsRecording) return; // No detener entrada si se está grabando
             if (!_isMonitoringInput) return;
 
+            _isMonitoringInput = false;
+
             if (!IsAsio)
             {
                 _recorder?.StopRecording();
+                _currentRecordingTrack?.MonitorProvider?.ClearBuffer(); // Vaciar cualquier audio residual
             }
-            // En ASIO seguimos dejando la pista armada; simplemente no habrá salida si está muteada.
-
-            _isMonitoringInput = false;
 
             // Restaurar estado de muteo de las pistas tras la monitorización
             if (_monitoringMuteSnapshot != null)
@@ -1305,8 +1455,18 @@ namespace Grabadora
             var track = GetTrack(trackIndex);
             if (track != null)
             {
-                left = track.LastPeakLeft;
-                right = track.LastPeakRight;
+                if (IsTrackRecording(trackIndex))
+                {
+                    left = track.LiveInputPeak;
+                    right = track.LiveInputPeak; // Un solo medidor visual en grabación mono
+                    track.DecayLiveInputPeak(); // Aplicar caída visual
+                }
+                else
+                {
+                    left = track.LastPeakLeft;
+                    right = track.LastPeakRight;
+                    track.DecayPlaybackPeaks(); // Evita que la aguja se congele en Play/Stop
+                }
             }
         }
 
@@ -1758,18 +1918,18 @@ namespace Grabadora
             track.ReverbEffect.RoomSize = roomSize;
         }
 
-        public object GetEffectParameters(int trackIndex)
+        public TrackData GetEffectParameters(int trackIndex)
         {
             var track = GetTrack(trackIndex);
             if (track == null) return null;
-            return new {
+            return new TrackData {
                 EqGains = track.Equalizer.GetGains(),
-                Delay = new { Delay = track.DelayEffect.CurrentDelay, Feedback = track.DelayEffect.Feedback, Mix = track.DelayEffect.WetMix },
-                Compressor = new { Threshold = track.CompressorEffect.GetThreshold(), Ratio = track.CompressorEffect.GetRatio(), Attack = track.CompressorEffect.GetAttack(), Release = track.CompressorEffect.GetRelease() },
-                Filter = new { Type = track.FilterEffect.CurrentType, Cutoff = track.FilterEffect.CurrentCutoff },
-                Distortion = new { Drive = track.DistortionEffect.Drive, Mix = track.DistortionEffect.Mix },
-                Chorus = new { Mix = track.ChorusEffect.Mix, Depth = track.ChorusEffect.Depth, Rate = track.ChorusEffect.Rate },
-                Reverb = new { Mix = track.ReverbEffect.Mix, RoomSize = track.ReverbEffect.RoomSize },
+                Delay = new DelayData { TimeMs = track.DelayEffect.CurrentDelay, Feedback = track.DelayEffect.Feedback, Mix = track.DelayEffect.WetMix },
+                Compressor = new CompressorData { Threshold = track.CompressorEffect.GetThreshold(), Ratio = track.CompressorEffect.GetRatio(), Attack = track.CompressorEffect.GetAttack(), Release = track.CompressorEffect.GetRelease() },
+                Filter = new FilterData { Type = (int)track.FilterEffect.CurrentType, Cutoff = track.FilterEffect.CurrentCutoff },
+                Distortion = new DistortionData { Drive = track.DistortionEffect.Drive, Mix = track.DistortionEffect.Mix },
+                Chorus = new ChorusData { Mix = track.ChorusEffect.Mix, Depth = track.ChorusEffect.Depth, Rate = track.ChorusEffect.Rate },
+                Reverb = new ReverbData { Mix = track.ReverbEffect.Mix, Size = track.ReverbEffect.RoomSize },
                 Tempo = track.TimeStretchEffect.Tempo
             };
         }
@@ -2732,24 +2892,38 @@ namespace Grabadora
         {
             var track = GetTrack(trackIndex);
             if (track == null || pointsToRender <= 0) return Array.Empty<float>();
-            if (track.Samples == null) return new float[pointsToRender]; // Si está grabando, devolver silencio visual
 
-            var audioSamples = track.Samples;
-            var waveFormat = track.Reader?.WaveFormat ?? track.MonitorProvider.WaveFormat;
+            var waveFormat = track.Reader?.WaveFormat ?? track.MonitorProvider?.WaveFormat ?? track.RecordingBuffer?.WaveFormat;
+            if (waveFormat == null) return new float[pointsToRender];
+
+            float[] audioSamples = null;
+            int totalAvailableSamples = 0;
+
+            if (track.Samples != null)
+            {
+                audioSamples = track.Samples;
+                totalAvailableSamples = audioSamples.Length;
+            }
+            else
+            {
+                lock (track.LiveSamplesLock)
+                {
+                    audioSamples = track.LiveSamplesBuffer;
+                    totalAvailableSamples = track.LiveSamplesCount;
+                }
+            }
+
+            if (audioSamples == null || totalAvailableSamples == 0) 
+                return new float[pointsToRender];
 
             int sampleRate = waveFormat.SampleRate;
             int channels = waveFormat.Channels;
 
-            // CORRECCIÓN 2: Ajustar por el Tempo (Time Stretch)
-            // Si el tempo es 0.5 (lento), necesitamos leer menos muestras originales para llenar el mismo tiempo visual.
-            // Si el tempo es 2.0 (rápido), necesitamos leer más muestras originales.
             float tempo = track.TimeStretchEffect?.Tempo ?? 1.0f;
             
-            // Mapear el tiempo del proyecto al tiempo del archivo de audio original
             double sourceStartSeconds = startSeconds * tempo;
             double sourceEndSeconds = endSeconds * tempo;
 
-            // Esto asegura que la escala visual (segundos por pixel) sea constante para todas las pistas.
             long reqStartSample = (long)(sourceStartSeconds * sampleRate * channels);
             long reqEndSample = (long)(sourceEndSeconds * sampleRate * channels);
             long reqTotalSamples = reqEndSample - reqStartSample;
@@ -2765,16 +2939,14 @@ namespace Grabadora
                 long currentStart = reqStartSample + (long)(i * samplesPerPoint);
                 long currentEnd = reqStartSample + (long)((i + 1) * samplesPerPoint);
                 
-                // Si el pixel corresponde a un tiempo fuera de la duración de esta pista, es silencio
-                if (currentStart >= audioSamples.Length || currentEnd < 0)
+                if (currentStart >= totalAvailableSamples || currentEnd < 0)
                 {
                     waveform[i] = 0;
                     continue;
                 }
 
-                // Intersección entre lo que pide el pixel y lo que tiene la pista
                 long readStart = Math.Max(0, currentStart);
-                long readEnd = Math.Min(audioSamples.Length, currentEnd);
+                long readEnd = Math.Min(totalAvailableSamples, currentEnd);
 
                 if (readEnd <= readStart)
                 {
@@ -2783,7 +2955,6 @@ namespace Grabadora
                 }
 
                 float max = 0;
-                // Optimización: saltar muestras si el rango es muy denso, pero en zoom solemos querer detalle
                 int step = (int)samplesPerPoint > 100 ? (int)(samplesPerPoint / 50) : 1;
 
                 for (long j = readStart; j < readEnd; j += step)
@@ -2944,12 +3115,23 @@ namespace Grabadora
                 }
 
                 // 3. Escribir directamente al buffer circular de la pista (Floats)
-                _currentRecordingTrack.RecordingBuffer.Write(_asioInputBuffer, 0, totalSamplesToWrite);
+                if (_isMonitoringInput || IsRecording)
+                {
+                    _currentRecordingTrack.RecordingBuffer.Write(_asioInputBuffer, 0, totalSamplesToWrite);
+                    _currentRecordingTrack.UpdateLiveInputPeak(_asioInputBuffer, totalSamplesToWrite);
+                }
+                else
+                {
+                    // En ASIO, si el monitor está apagado, empujamos silencio para mantener el buffer estable pero sin sonido
+                    Array.Clear(_asioInputBuffer, 0, totalSamplesToWrite);
+                    _currentRecordingTrack.RecordingBuffer.Write(_asioInputBuffer, 0, totalSamplesToWrite);
+                }
 
                 // 4. Escribir a disco si estamos grabando
                 if (IsRecording && _recordingWriter != null)
                 {
                     _recordingWriter.WriteSamples(_asioInputBuffer, 0, totalSamplesToWrite);
+                    _currentRecordingTrack?.AddLiveSamples(_asioInputBuffer, totalSamplesToWrite);
                 }
             }
         }
@@ -3591,5 +3773,46 @@ namespace Grabadora
         public override void SetLength(long value) => _baseStream.SetLength(value);
         public override void Write(byte[] buffer, int offset, int count) => _baseStream.Write(buffer, offset, count);
         protected override void Dispose(bool disposing) { /* No cerrar baseStream */ }
+    }
+
+    public class MeteringSampleProvider : ISampleProvider
+    {
+        private readonly ISampleProvider _source;
+        private readonly float[] _maxSamples;
+        private int _sampleCount;
+        public WaveFormat WaveFormat => _source.WaveFormat;
+        public int SamplesPerNotification { get; set; }
+        public event EventHandler<StreamVolumeEventArgs> StreamVolume;
+
+        public MeteringSampleProvider(ISampleProvider source)
+        {
+            _source = source;
+            _maxSamples = new float[source.WaveFormat.Channels];
+            SamplesPerNotification = source.WaveFormat.SampleRate / 10;
+        }
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            int read = _source.Read(buffer, offset, count);
+            for (int i = 0; i < read; i++)
+            {
+                float abs = Math.Abs(buffer[offset + i]);
+                _maxSamples[i % WaveFormat.Channels] = Math.Max(_maxSamples[i % WaveFormat.Channels], abs);
+                _sampleCount++;
+
+                if (_sampleCount >= SamplesPerNotification)
+                {
+                    StreamVolume?.Invoke(this, new StreamVolumeEventArgs { MaxSampleValues = (float[])_maxSamples.Clone() });
+                    Array.Clear(_maxSamples, 0, _maxSamples.Length);
+                    _sampleCount = 0;
+                }
+            }
+            return read;
+        }
+    }
+
+    public class StreamVolumeEventArgs : EventArgs
+    {
+        public float[] MaxSampleValues { get; set; }
     }
 }

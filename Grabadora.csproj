@@ -8,8 +8,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <PlatformTarget>x64</PlatformTarget>
     <Platforms>x64</Platforms>
-    <ApplicationIcon>obj\Resource\logo.ico</ApplicationIcon>
-    
   </PropertyGroup>
 
   <!-- Establecer x64 como plataforma por defecto si no se especifica -->

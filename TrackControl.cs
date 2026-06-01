@@ -26,6 +26,7 @@ namespace Grabadora
         public event EventHandler<TimeSpan[]>? SelectionChanged; // [Start, End]
         public event EventHandler? MoveUpRequested;
         public event EventHandler? MoveDownRequested;
+        public event EventHandler? MonitorRequested;
 
         private const int DefaultTrackHeight = 150;
         private AudioEngine _engine;
@@ -198,7 +199,7 @@ namespace Grabadora
             // Menú Contextual para opciones de pista
             _contextMenu = new ContextMenuStrip();
             _contextMenu.Items.Add("Normalizar Audio", null, async (s, e) => {
-                await ((dynamic)_engine).NormalizeTrackAsync(TrackIndex);
+                await _engine.NormalizeTrackAsync(TrackIndex);
                 RefreshWaveform();
             });
             _contextMenu.Items.Add("Detectar Kicks (Golpes)", null, async (s, e) => {
@@ -210,19 +211,19 @@ namespace Grabadora
             _contextMenu.Items.Add("-");
             _contextMenu.Items.Add("Fade In Selección", null, async (s, e) => {
                 if (SelectionStart.HasValue && SelectionEnd.HasValue) {
-                    await ((dynamic)_engine).ApplyFadeInAsync(TrackIndex, SelectionStart.Value, SelectionEnd.Value);
+                    await _engine.ApplyFadeInAsync(TrackIndex, SelectionStart.Value, SelectionEnd.Value);
                     RefreshWaveform();
                 }
             });
             _contextMenu.Items.Add("Fade Out Selección", null, async (s, e) => {
                 if (SelectionStart.HasValue && SelectionEnd.HasValue) {
-                    await ((dynamic)_engine).ApplyFadeOutAsync(TrackIndex, SelectionStart.Value, SelectionEnd.Value);
+                    await _engine.ApplyFadeOutAsync(TrackIndex, SelectionStart.Value, SelectionEnd.Value);
                     RefreshWaveform();
                 }
             });
             _contextMenu.Items.Add("Reverse Selección", null, async (s, e) => {
                 if (SelectionStart.HasValue && SelectionEnd.HasValue) {
-                    await ((dynamic)_engine).ReverseAsync(TrackIndex, SelectionStart.Value, SelectionEnd.Value);
+                    await _engine.ReverseAsync(TrackIndex, SelectionStart.Value, SelectionEnd.Value);
                     RefreshWaveform();
                 }
             });
@@ -411,21 +412,20 @@ namespace Grabadora
                         return;
                     }
 
-                    // Fuera de la grabación, el botón controla la monitorización en vivo
-                    if (!_engine.IsMonitoringInput)
-                    {
-                        _engine.StartMonitoring();
-                        // No tocar el estado de Mute de la pista grabada;
-                        // el usuario usa el botón "M" para silenciar la pista.
-                        _btnMonitor.IsActive = true; // Verde cuando se monitoriza
-                    }
-                    else
-                    {
-                        _engine.StopMonitoring();
-                        // Solo detenemos la monitorización; la pista sigue sonando
-                        // según su fader y estado de Mute/Solo.
-                        _btnMonitor.IsActive = false; // Gris cuando no se monitoriza
-                    }
+                bool turningOn = !_btnMonitor.IsActive;
+
+                if (turningOn)
+                {
+                    _engine.SetActiveRecordingTrack(TrackIndex);
+                    if (!_engine.IsMonitoringInput) _engine.StartMonitoring();
+                    _btnMonitor.IsActive = true;
+                    MonitorRequested?.Invoke(this, EventArgs.Empty);
+                }
+                else
+                {
+                    if (_engine.IsMonitoringInput) _engine.StopMonitoring();
+                    _btnMonitor.IsActive = false;
+                }
                 };
             }
 
@@ -1013,7 +1013,7 @@ namespace Grabadora
                     // Aplicar movimiento si es significativo (> 10ms)
                     if (Math.Abs(seconds) > 0.01)
                     {
-                        await ((dynamic)_engine).MoveTrackInTimeAsync(TrackIndex, TimeSpan.FromSeconds(seconds));
+                        await _engine.MoveTrackInTimeAsync(TrackIndex, TimeSpan.FromSeconds(seconds));
                         RefreshWaveform();
                     }
                     return;
@@ -1065,6 +1065,14 @@ namespace Grabadora
             return TimeSpan.FromSeconds(snappedBeats * secondsPerBeat);
         }
 
+        public void TurnOffMonitor()
+        {
+            if (_btnMonitor != null && _btnMonitor.IsActive)
+            {
+                _btnMonitor.IsActive = false;
+            }
+        }
+
         private void StartRenaming()
         {
             _txtNameEditor.Text = _lblTitle.Text;
@@ -1101,8 +1109,10 @@ namespace Grabadora
             int height = _pnlVuMeter.Height;
             int fillHeight = (int)(maxLevel * height);
             
-            // Dibujar fondo
-            e.Graphics.Clear(Color.Black);
+            // Dibujar fondo: Si la pista está armada para grabar, usamos un rojo oscuro
+            // para indicar visualmente que el medidor está mostrando el nivel de ENTRADA (Pre-Fader).
+            bool isRecordingTrack = _engine.IsTrackRecording(TrackIndex);
+            e.Graphics.Clear(isRecordingTrack ? Color.FromArgb(40, 10, 10) : Color.Black);
 
             if (fillHeight > 0)
             {
@@ -1177,7 +1187,7 @@ namespace Grabadora
             try
             {
                 var offset = TimeSpan.FromSeconds(seconds);
-                await ((dynamic)_engine).MoveTrackInTimeAsync(TrackIndex, offset);
+                await _engine.MoveTrackInTimeAsync(TrackIndex, offset);
                 RefreshWaveform();
             }
             catch (Exception ex)
@@ -1288,7 +1298,7 @@ namespace Grabadora
                     {
                         var seconds = (double)num.Value;
                         var offset = TimeSpan.FromSeconds(seconds);
-                        await ((dynamic)_engine).MoveTrackInTimeAsync(TrackIndex, offset);
+                        await _engine.MoveTrackInTimeAsync(TrackIndex, offset);
                         RefreshWaveform();
                     }
                     catch (Exception ex)
@@ -1429,14 +1439,54 @@ namespace Grabadora
                 }
             }
 
+            // 0.5 Dibujar líneas indicadoras de niveles horizontales (Amplitud / dB)
+            using (Pen levelPen = new Pen(Color.FromArgb(40, 255, 255, 255), 1) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dash })
+            using (Pen centerLinePen = new Pen(Color.FromArgb(60, 255, 255, 255), 1))
+            using (SolidBrush textBrush = new SolidBrush(Color.FromArgb(100, 255, 255, 255)))
+            using (Font textFont = new Font("Segoe UI", 7))
+            {
+                int centerY = height / 2;
+                
+                var levels = new[] 
+                {
+                    new { Amp = 1.0f, Text = "+1.0 (0 dB)" },
+                    new { Amp = 0.5f, Text = "+0.5 (-6 dB)" },
+                    new { Amp = 0.0f, Text = "0.0" },
+                    new { Amp = -0.5f, Text = "-0.5 (-6 dB)" },
+                    new { Amp = -1.0f, Text = "-1.0 (0 dB)" }
+                };
+
+                foreach (var lvl in levels)
+                {
+                    float y = centerY - (lvl.Amp * centerY);
+                    
+                    // Ajustar 'y' ligeramente en los bordes extremos para que la línea y el texto se vean
+                    if (y <= 0) y = 1;
+                    if (y >= height) y = height - 1;
+
+                    // Dibujar la línea (continua para el centro, punteada para los demás)
+                    g.DrawLine(lvl.Amp == 0.0f ? centerLinePen : levelPen, 0, y, width, y);
+                    
+                    float textY = lvl.Amp > 0 ? y + 2 : y - 14;
+                    if (lvl.Amp == 1.0f) textY = y + 2;
+                    if (lvl.Amp == -1.0f) textY = y - 14;
+                    if (lvl.Amp == 0.0f) textY = y + 2;
+
+                    g.DrawString(lvl.Text, textFont, textBrush, 5, textY);
+                }
+            }
+
             // Aplicar transformación visual si se está moviendo la pista
             if (_isMovingTrack) g.TranslateTransform(_visualMoveOffsetX, 0);
 
             // 1. Dibujar Onda (usando caché para evitar recálculos innecesarios)
             float[] samples;
 
+            bool isRecordingTrack = _engine.IsTrackRecording(TrackIndex);
+
             // Comprobar si la caché es válida
             if (_cachedWaveform != null &&
+                !isRecordingTrack && // No usar caché si está grabando para ver la onda en vivo
                 _cachedWidth == width &&
                 Math.Abs(_cachedStartTime - StartTime) < 1e-6 &&
                 Math.Abs(_cachedEndTime - EndTime) < 1e-6)
@@ -1446,7 +1496,7 @@ namespace Grabadora
             else
             {
                 // Regenerar caché
-                samples = ((dynamic)_engine).GetWaveformData(TrackIndex, width, StartTime, EndTime);
+                samples = _engine.GetWaveformData(TrackIndex, width, StartTime, EndTime);
                 _cachedWaveform = samples;
                 _cachedWidth = width;
                 _cachedStartTime = StartTime;
